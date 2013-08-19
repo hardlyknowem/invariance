@@ -45,63 +45,87 @@ import abc
 
 
 class ValidationError(Exception):
-    """A generic validation error.
+    """An exception to be raised for unexpected errors in validation.
 
-    This is intended to be used as a default error when the user does not
-    supply one.
+    This is intended to be used when the process of validating itself
+    causes an error, not when the validator detects invalid inputs.
 
     """
     pass
 
 
 class AbstractValidator(metaclass=abc.ABCMeta):
-    """An abstract Validator object providing mix-ins for validator logic.
+    """An abstract Validator object.
 
-    A validator is a callable object accepting a single argument and
-    having no return value. Conceptually, a validator must represent
-    some kind of boolean predicate. Calling the validator with an object
-    as a target should raise a ValidationError if the predicate is not
-    true of the object. If the predicate is True, the function should
-    have no effect.
+    A validator is an object that conceptually represents some kind of
+    boolean predicate, and provides methods for interacting with that
+    predicate in various ways.
 
-    The subclasses should represent their predicates through the `valid`
-    method. (An earlier design had the subclasses override the __call__
-    method and allowed them to raise any exception; unfortunately, this
-    made it difficult to define the compound validators without using
-    overly broad exception clauses.) The `valid` method should return
-    the truth-value of the predicate this Validator represents for the
-    object.
+    In its most basic use case, a client can use the validator as a
+    boolean predicate function, returning the truth-value of the
+    predicate for a particular object. This is implemented via the
+    `is_valid` method, but also when the object is used as a callable.
+
+    Alternatively, the validator can be used as an assertion with the
+    `assertion` method. This method will raise an error (specified by
+    the subclass of AbstractValidator) if the predicate is False and
+    do nothing otherwise.
+
+    Subclasses of this class should implement the underlying predicate
+    using the `validate` method, which returns an exception class if
+    the predicate is False and nothing if the predicate is True.
 
     Since validators conceptually represent boolean predicates, they can
     be combined in much the same ways that real boolean variables can.
-    The "&", "|", and "^" ("and", "or", and "xor", respectively)
-    operators are defined on this class such that, for validators V1 and
-    V2, V1 & V2 will raise an exception unless the conditions for both
-    V1 and V2 are met, V1 | V2 will raise an exception only if neither
-    condition for neither V1 nor V2 is met, and V1 ^ V2 will raise an
-    exception if the conditions for
+    The "&" and "|" ("and" and "or", respectively) operators are defined
+    on this class such that, for validators V1 and V2, V1 & V2 will fail
+    unless the conditions for both V1 and V2 are met, and V1 | V2 will
+    fail only if the conditions for neither V1 nor V2 are met. The "^"
+    operator ("exclusive-or") is not supported, as it is unclear what
+    exception should be raised if the exclusive-or condition were not
+    true.
 
-    (They also allow non-validator operands, on either side, to be
-    converted to BooleanValidator objects.)
+    The above mix-in methods allow non-validator operands, on either
+    side of the operator, to be implicitly converted to BooleanValidator
+    objects.
 
     """
+    def is_valid(self, target):
+        """Return True if the underlying predicate is true of `target`.
+
+        @param target: The object to validate against the validator.
+
+        """
+        return self.validate(target) is None
+
+    def assertion(self, target):
+        result = self.validate(target)
+        if result is None:
+            return
+        else:
+            raise result
+
     @abc.abstractmethod
-    def valid(self, item):
-        """Return True if the underlying predicate is true of `item`.
+    def validate(self, target):
+        """This method implements the validation logic.
 
-        @param item: The object to validate against the validator.
+        The `target` is the object of which we are asserting an
+        invariant. If the invariant is True of the target, this method
+        returns None. If the invariant is False, it returns (not raises)
+        a fully-constructed instance of an exception.
 
-        """
-        raise NotImplementedError
-
-    def __call__(self, item):
-        """Raise an exception if `item` does not meet the validator condition.
-
-        @param item: The object to validate against the validator.
+        @param target: The object to validate against the validator.
 
         """
-        if not self.valid(item):
-            raise ValidationError("invariant not true of %r" % item)
+        return None
+
+    def __call__(self, target):
+        """Dynamic hook to the `is_valid` method.
+
+        @param target: The validation target.
+
+        """
+        return self.is_valid(target)
 
     def __and__(self, other):
         """Return a Validator combining both operands conjunctively.
@@ -167,38 +191,6 @@ class AbstractValidator(metaclass=abc.ABCMeta):
         """
         return BooleanValidator(other) | self
 
-    def __xor__(self, other):
-        """"Return a Validator combining both operands exclusive-disjunctively.
-
-        If `other` is not a validator object, then it is assumed to be a
-        callable object representing a boolean predicate, taking a
-        single parameter and returning True if the predicate obtains of
-        that parameter and False if not. The predicate will be converted
-        to a BooleanValidator object before being combined with this
-        Validator.
-
-        @param other: The other validator, or a callable object, as
-            described in the above.
-
-        """
-        if not isinstance(other, AbstractValidator):
-            other = BooleanValidator(other)
-        return ExclusiveDisjunctiveValidator(self, other)
-
-    def __rxor__(self, other):
-        """Used to implement mirror of __xor__.
-
-        If this is called, it means that `other` has no __and__ method
-        defined, and so we can safely assume it is not a Validator
-        instance. This method makes the same assumptions of
-        non-validators as its non-reflected variant, and will convert
-        `other` into a BooleanValidator.
-
-        @param other: A callable object representing a boolean predicate.
-
-        """
-        return BooleanValidator(other) ^ self
-
 
 #==============================================================================
 # Basic Validators
@@ -210,29 +202,53 @@ class BooleanValidator(AbstractValidator):
 
     This object is constructed from a callable object, which is assumed
     to represent an invariant predicate. The function should return True
-    if the predicate obtains and False if not. This validator will raise
-    an exception if the validation target does not meet the predicate.
+    if the predicate obtains and False if not. If the predicate does not
+    hold of the validated object, the validate method will return an
+    exception with the specified error class and message specified in
+    the constructor.
+
+    When the predicate is not True, the `validate` method will construct
+    an exception by calling `error_class` with `error_message` as an
+    argument. For convenience, the `format` method of `error_message`
+    will be called with `target` as a keyword argument. It does not have
+    to be used, but it is often helpful.
 
     """
-    def __init__(self, callable_, error_class=ValidationError):
+    DEFAULT_ERROR_MESSAGE = "invariant not true of {target|r}"
+
+    def __init__(self, callable_, error_class=AssertionError,
+                 error_message=DEFAULT_ERROR_MESSAGE):
         """Initialize the BooleanValidator.
 
         @param callable_: A callable object representing a predicate,
             as defined by the class docstring.
         @param error_class: The error to be raised if the validation
-            failse.
+            fails.
+        @param error_message: A string message for the error class.
 
         """
         self.callable = callable_
         self.error_class = error_class
+        self.error_message = error_message
 
-    def valid(self, item):
-        """Return the value the underlying predicate would return.
+    def is_valid(self, target):
+        """Simplified `is_valid` method to avoid unnecessary overhead.
 
-        @param item: The item to validate.
+        @param target: The object to be validated.
 
         """
-        return self.callable(item)
+        return self.callable(target)
+
+    def validate(self, target):
+        """Return the value the underlying predicate would return.
+
+        @param target: The object to validate.
+
+        """
+        if not self.callable(target):
+            return self.error_class(self.error_message.format(target=target))
+        else:
+            return None
 
 
 def Type(type_):
@@ -242,7 +258,10 @@ def Type(type_):
         validator will require all validation targets to be an instance.
 
     """
-    return BooleanValidator(lambda target: isinstance(target, type_))
+    return BooleanValidator(
+        lambda target: isinstance(target, type_),
+        TypeError, '{target!r} not of type ' + type_.__name__
+    )
 
 
 #==============================================================================
@@ -262,13 +281,23 @@ class ConjunctiveValidator(AbstractValidator):
         self.left = left
         self.right = right
 
-    def valid(self, item):
-        """Return True if both underlying validators would accept the item.
+    def validate(self, target):
+        """Return the result of using both validators on `target`.
 
-        @param item: The item to validate.
+        If either validator returns an exception, the exception will be
+        returned.
+
+        @param target: The object to validate.
 
         """
-        return self.left(item) and self.right(item)
+        # First, keep in mind we return None unless the invariant is
+        # False. So by DeMorgan's law, we actually need an `or` here.
+        # The `or` will return the exception if `left` or `right`
+        # produces one or `None` if neither do. Also keep in mind that
+        # Exception instances are generally always True. If somebody has
+        # an Exception subclass with a __bool__ method, then they are
+        # doing something weird.
+        return self.left(target) or self.right(target)
 
 
 class DisjunctiveValidator(AbstractValidator):
@@ -283,34 +312,21 @@ class DisjunctiveValidator(AbstractValidator):
         self.left = left
         self.right = right
 
-    def valid(self, item):
-        """Return True if one of the underlying validators would accept `item`.
+    def validate(self, target):
+        """Return the result of using either validator on `target`.
 
-        @param item: The item to validate.
+        If either validator returns `None`, `None` is returned. If
+        both validators return exceptions, the exception returned by
+        `right` is returned.
 
-        """
-        return self.left(item) or self.right(item)
-
-
-class ExclusiveDisjunctiveValidator(AbstractValidator):
-    """A validator with two children, exactly one of which must be true."""
-    def __init__(self, left, right):
-        """Initialize the ExclusiveDisjunctiveValidator.
-
-        @param left: The first validator to be checked.
-        @param right: The second validator to be checked.
+        @param target: The object to validate
 
         """
-        self.left = left
-        self.right = right
-
-    def valid(self, item):
-        """Return True if exactly one of the child validators accepts `item`.
-
-        @param item: The item to validate.
-
-        """
-        return self.left(item) ^ self.right(item)
+        # See note about DeMorgan's law in ConjunctiveValidator. The
+        # `and` will return `None` if either `left` or `right` return
+        # `None`, and an exception if either return an exception. If
+        # both return an exception, only the latter will be returned.
+        self.left(target) and self.right(target)
 
 
 #==============================================================================
@@ -329,17 +345,16 @@ class ContainerValidator(AbstractValidator):
         """
         self.inner_validator = inner_validator
 
-    def valid(self, target):
-        """Return True if the predicate is True of all elements of `target`.
+    def validate(self, target):
+        """Validate all the items of `target`.
 
         @param target: The iterable target to validate.
 
         """
         for item in target:
-            if not self.inner_validator(item):
-                return False
-        else:
-            return True
+            result = self.inner_validator.validate(item)
+            if result is not None:
+                return result
 
 
 class UniquenessValidator(AbstractValidator):
@@ -359,18 +374,21 @@ class UniquenessValidator(AbstractValidator):
         """
         self.key_function = key_function
 
-    def valid(self, target):
+    def validate(self, target):
         """Return True if the elements of `target` are unique.
 
         @param target: The target to validate.
 
         """
-        keyset = set()
+        keyset = {}
         for item in target:
             key = self.key_function(item)
-            if key in keyset:
-                return False
-            keyset.add(key)
+            inserted = keyset.setdefault(key, item)
+            if inserted is not item:
+                return ValueError(
+                    "{0!r} and {1!r} have same keys".format(inserted, item)
+                )
+        return None
 
 
 class UniformityValidator(AbstractValidator):
@@ -398,7 +416,7 @@ class UniformityValidator(AbstractValidator):
         """
         iterator = iter(target)
 
-        # Need a special guard singleton, in case None is a real element
+        # Need a special guard singleton, in case `None` is a real element
         first = next(iterator, self._GUARD)
         if first is self._GUARD:
             return
@@ -407,12 +425,16 @@ class UniformityValidator(AbstractValidator):
 
         for item in iterator:
             if self.key_function(item) != key:
-                raise ValidationError("uniformity not true of %r" % target)
+                return ValueError(
+                    "{0!r} and {1!r} have different keys".format(first, item)
+                )
+        return None
+
     _GUARD = object()
 
 
 #==============================================================================
-# Iterable Validators
+# Attribute Validation
 #==============================================================================
 
 
